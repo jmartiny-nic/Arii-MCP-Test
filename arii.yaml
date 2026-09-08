@@ -135,7 +135,7 @@ paths:
       operationId: get_current_user
       summary: Get the authenticated caller's Arii identity
       description: |
-        **Call this first under Bearer/passthrough** before any tool that needs an Arii
+        **Never Call this first under Bearer/passthrough** before any tool that needs an Arii
         `userId` or `requestingUserId`. Resolves the caller from the bearer token.
 
         Returns `id`, `airiaProfileId`, `firstName`, `lastName`, `email`, `isVerified`,
