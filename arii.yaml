@@ -35,7 +35,11 @@ info:
       (`GET /api/v1/Users/me`) once and reuse the returned `id` as your Arii user ID.
       Do not guess from Airia profile ID / Keycloak `sub`. Optional: call `get_user`
       with that `id` to confirm `id` <-> `airiaProfileId`. `get_current_user` and
-      `get_user` have no date of birth, sex, height, weight, or allergies.
+      `get_user` have no date of birth, sex, height, weight, or allergies; for those
+      call **`get_user_preferences`** with the Arii user ID.
+    - "How old is she / height / weight / allergies / dietary restrictions / timezone" ->
+      `get_current_user` (self) or patient Arii ID -> **`get_user_preferences`**
+      (send `X-Access-Context: group` when a provider reads a patient).
     - "Provider reading a patient" -> path `userId` = patient Arii ID from execution
       context; `requestingUserId` = **`get_current_user`.id**
     - "What are her current numbers / is she hitting her target?" ->
@@ -144,7 +148,7 @@ paths:
         valid as path/query `userId` under Bearer.
 
         Carries no demographics: no date of birth, sex, height, or weight. Those live
-        on user preferences, which are not exposed.
+        on user preferences: call `get_user_preferences` with the returned `id`.
 
         No path parameters. Identity comes from the Bearer token. 401 if
         unauthenticated; 404 if the token has no linked Arii user.
@@ -180,8 +184,8 @@ paths:
         its returned `id` here. For another user: use their Arii user ID from agent
         execution context, never an Airia profile ID.
 
-        `UserDto` has no date of birth or sex. Demographics live on user preferences,
-        which are not exposed in this spec.
+        `UserDto` has no date of birth or sex. Demographics live on user preferences:
+        use `get_user_preferences` with the same `userId`.
       x-mcp-annotations:
         readOnlyHint: true
         idempotentHint: true
@@ -206,6 +210,68 @@ paths:
   # NOTE: DELETE /api/v1/Users/{userId} is intentionally not exposed as an MCP tool.
   # Permanent user deletion is a privileged operation and must be performed through
   # the Arii UI, not by an agent.
+
+  /api/v3/UserPreferences/{userId}:
+    get:
+      tags: [Users]
+      operationId: get_user_preferences
+      summary: Get a user's profile preferences and demographics
+      description: |
+        Returns the user's preference record: demographics (`dateOfBirth` as
+        `YYYY-MM-DD`, `sex`, `height`/`heightUnit`, `weight`/`weightUnit`), names,
+        phone, `aboutMe`, `timeZoneIdentifier`, `useMetricSystem`, preferred health
+        data source, allergies, dietary preferences, and goals.
+
+        **Use this for:** "How old is she / what is his date of birth?", "What is my
+        height / weight / BMI inputs?", "Does the patient have allergies or dietary
+        restrictions?", "Which timezone / unit system does the user use?".
+        `get_current_user` and `get_user` do **not** carry any of this.
+
+        **Requires an Arii user ID** (`UserDto.id`), not an Airia profile ID.
+        For self under Bearer: call `get_current_user` first and pass its `id`.
+        **Provider reading a patient:** pass the patient's Arii user ID and send
+        `X-Access-Context: group`; otherwise share/family permissions are checked
+        and a 403 means missing access, not missing data. Shared fields may be
+        filtered by the granting user's permissions.
+
+        Enum fields are integers: `sex` 0=Male, 1=Female, 2=Other.
+        `preferredDataSource` 0=Arii, 1=Fitbit, 2=Oura, 3=Withings, 4=AppleHealth,
+        5=Garmin, 6=Whoop (see schema for the full list); prefer
+        `preferredDataSourceName` when present.
+      x-mcp-annotations:
+        readOnlyHint: true
+        idempotentHint: true
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: |
+            Arii user ID (`UserDto.id` GUID). For self under Bearer, use
+            `get_current_user`.id. Do not pass an Airia profile ID, Keycloak `sub`,
+            or group ID.
+          schema:
+            type: string
+            format: uuid
+        - name: X-Access-Context
+          in: header
+          required: false
+          description: |
+            Set to `group` when a provider/team member reads a patient in their
+            organization. Omit for self or family/share-based access.
+          schema:
+            type: string
+            enum: [group]
+      responses:
+        "200":
+          description: User preferences and demographics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreferencesDto"
+        "403":
+          description: Caller lacks family, share, or group permission to read this user's profile
+        "404":
+          description: No preferences exist for this user, or wrong ID kind (Airia profile ID / Keycloak `sub`)
 
   # ===================
   # JOURNAL ENDPOINTS
@@ -1585,6 +1651,179 @@ components:
           type: string
           format: uuid
           description: Active group/organization ID (not a user ID)
+
+    UserPreferencesDto:
+      type: object
+      description: |
+        User profile preferences and demographics. Enums are serialized as integers.
+        `dateOfBirth` is a calendar date `YYYY-MM-DD` (no time component).
+      properties:
+        userId:
+          type: string
+          format: uuid
+          description: Arii user ID this preference record belongs to
+        firstName:
+          type: string
+          nullable: true
+        middleName:
+          type: string
+          nullable: true
+        lastName:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+          description: Deprecated full name; prefer firstName/middleName/lastName
+        aboutMe:
+          type: string
+          nullable: true
+          description: Free-text "about me" written by the user (max 800 chars)
+        sex:
+          type: integer
+          enum: [0, 1, 2]
+          description: "Biological sex: 0=Male, 1=Female, 2=Other"
+        dateOfBirth:
+          type: string
+          format: date
+          nullable: true
+          description: Date of birth as `YYYY-MM-DD`
+        height:
+          type: number
+          nullable: true
+          description: Height in `heightUnit`
+        heightUnit:
+          type: string
+          nullable: true
+          description: Unit for `height` (e.g. `cm`, `in`)
+        weight:
+          type: number
+          nullable: true
+          description: Weight in `weightUnit`
+        weightUnit:
+          type: string
+          nullable: true
+          description: Unit for `weight` (e.g. `kg`, `lb`)
+        phone:
+          type: string
+          nullable: true
+        useMetricSystem:
+          type: boolean
+          description: True if the user prefers metric units
+        timeZoneIdentifier:
+          type: string
+          description: IANA time zone (e.g. `America/New_York`). Use it when interpreting local dates.
+        preferredDataSource:
+          type: integer
+          description: |
+            Preferred health data source: 0=Arii, 1=Fitbit, 2=Oura, 3=Withings,
+            4=AppleHealth, 5=Garmin, 6=Whoop, 7=BioStrap, 8=Strava, 9=HealthConnect,
+            10=Elation, 11=FreeStyleLibre, 12=Cronometer, 13=Mira, 14=Dexcom, 15=Polar,
+            16=Omron, 17=HeartMath, 18=InBody, 19=Cerbo, 20=AdvancedMd, 21=OneUpHealth,
+            22=JunctionLabReport, 23=Kardia, 24=Peloton, 25=Healthie, 26=Athena,
+            27=HeadsUpV1, 28=HumanApi
+        preferredDataSourceName:
+          type: string
+          nullable: true
+          description: Human-readable preferred data source (e.g. `Fitbit`). Prefer this over the integer.
+        tone:
+          type: integer
+          description: |
+            Preferred AI response tone: 0=ConciseAndFormal, 1=ModerateAndFormal,
+            2=LengthyAndFormal, 3=ConciseAndBalanced, 4=ModerateAndBalanced,
+            5=LengthyAndBalanced, 6=ConciseAndCasual, 7=ModerateAndCasual, 8=LengthyAndCasual
+        isFollowUp:
+          type: boolean
+          description: Whether the user wants follow-up questions
+        shareLocation:
+          type: integer
+          description: "Location sharing: 0=AllowOnce, 1=AllowWhileUsingApp, 2=NotAllowed"
+        isShareAppleHealth:
+          type: boolean
+          nullable: true
+        isShareAppleHealthClinical:
+          type: boolean
+          nullable: true
+        onboardingFlow:
+          type: integer
+          nullable: true
+          description: "0=Provider, 1=TeamMember, 2=PatientViaInvitationToken, 3=PatientViaGroupCode, 4=StandalonePatient"
+        allergies:
+          type: array
+          nullable: true
+          description: Known allergies
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              allergy:
+                type: integer
+                description: Allergy type enum (integer)
+              allergyName:
+                type: string
+                nullable: true
+                description: Human-readable allergy name
+              otherAllergies:
+                type: array
+                nullable: true
+                items:
+                  type: string
+              description:
+                type: string
+                nullable: true
+              source:
+                type: string
+                nullable: true
+        dietaryPreferences:
+          type: array
+          nullable: true
+          description: Dietary preferences / restrictions
+          items:
+            type: object
+            properties:
+              preference:
+                type: integer
+                description: Dietary preference enum (integer)
+              userDefinedPreferences:
+                type: array
+                nullable: true
+                items:
+                  type: string
+        goals:
+          type: array
+          nullable: true
+          description: Health goals selected by the user
+          items:
+            type: object
+            properties:
+              goalId:
+                type: string
+                format: uuid
+              name:
+                type: string
+              description:
+                type: string
+                nullable: true
+              userDefinedGoals:
+                type: array
+                nullable: true
+                items:
+                  type: string
+        preferredDrinkSizes:
+          type: array
+          items:
+            type: integer
+          description: Preferred drink sizes in `drinkSizeUnit`
+        drinkSizeUnit:
+          type: string
+        selectedDrinkSizeValue:
+          type: number
+          nullable: true
+        selectedDrinkSizeUnit:
+          type: string
+          nullable: true
 
     ActivityDto:
       type: object
