@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Arii Health Platform API
-  version: "3.1.0"
+  version: "6.0.0"
   x-mcp-tool-prefix: Arii_MCP
   description: |
     Arii is a health and wellness platform for patient data, clinical notes, observations,
@@ -395,29 +395,35 @@ paths:
   # ===================
   # MEAL ENDPOINTS
   # ===================
-  /api/v1/Meals/{userId}:
+  /api/v1/Meals/{userId}/meals-compact:
     get:
       tags: [Meals]
       operationId: get_user_meals
-      summary: Get all meals for a user
+      summary: Get every meal for a user in a date window, with the count
       description: |
-        Returns meals recorded by a user over a date range, including their attached
-        nutrition data.
+        Returns every meal a user recorded over a date range, with its nutrition, and
+        `totalCount`, the number of meals in the window. Not paged: the list is the whole
+        window.
 
-        Nutrition arrives in `healthKitSamples`. Each entry carries `quantityTypeName`
-        (`TotalFats`, `DietaryFiber`, `DietaryProtein`, …) — read that. The integer
-        `quantityType` beside it is the same value (1 carbohydrates, 3 energy, 4 fibre,
-        5 protein, 6 sodium, 7 total fat, 13 sugar) and is only for clients that predate
-        the name. Never infer a nutrient from the order entries arrive in: fibre and total
-        fat, and carbohydrates and protein, are easy to transpose and the reply gives the
-        reader no way to notice.
+        **For how many, quote `totalCount`.** Never count the meals yourself: a long list
+        is easy to miscount, and the server has already counted it.
 
-        Use `recordStartDate` and `recordEndDate` together as `yyyy-MM-dd`.
+        Nutrition arrives in `healthKitSamples`, one entry per nutrient. Read each entry's
+        `quantityTypeName` (`TotalFats`, `DietaryFiber`, `DietaryProtein`, …). Never infer a
+        nutrient from the order entries arrive in: fibre and total fat, and carbohydrates and
+        protein, are easy to transpose and the reply gives the reader no way to notice.
 
-        When no meals match, this returns 404 with a message, not an empty list. That is
-        the tool saying it found no records for the filter — it is not an error, and it
-        does not mean the person did not eat. Dietary marker data can exist without meal
-        records.
+        Send `recordStartDate`, `recordEndDate`, or both, as `yyyy-MM-dd`. They are the
+        patient's own calendar days, and the end day is covered in full. Either alone leaves
+        that side open: for the whole record, send `recordEndDate` as today and no start.
+        Neither, or a start after the end, returns 400.
+
+        No meals in the window returns `totalCount: 0` and an empty list. That is not an
+        error, and it does not mean the person did not eat. Dietary marker data can exist
+        without meal records.
+
+        A field with nothing recorded is left out of the meal. A meal with no `dataSource`
+        was entered by hand.
       x-mcp-annotations:
         readOnlyHint: true
         idempotentHint: true
@@ -425,45 +431,29 @@ paths:
         - $ref: "#/components/parameters/AriiUserIdPath"
         - name: recordStartDate
           in: query
-          description: Patient local calendar start day (YYYY-MM-DD). Send together with recordEndDate.
+          description: Patient local calendar start day (YYYY-MM-DD). Omit for no lower bound. Send this, recordEndDate, or both.
           schema:
             type: string
             format: date
         - name: recordEndDate
           in: query
-          description: Patient local calendar end day (YYYY-MM-DD). Send together with recordStartDate.
+          description: Patient local calendar end day (YYYY-MM-DD), covered in full. Omit for no upper bound. Send this, recordStartDate, or both.
           schema:
             type: string
             format: date
-        - name: date
-          in: query
-          description: Filter by specific date (ISO 8601). Prefer the record-date pair.
-          schema:
-            type: string
-            format: date-time
-        - name: startDate
-          in: query
-          description: Filter start date (ISO 8601). Prefer the record-date pair.
-          schema:
-            type: string
-            format: date-time
-        - name: endDate
-          in: query
-          description: Filter end date (ISO 8601). Prefer the record-date pair.
-          schema:
-            type: string
-            format: date-time
       responses:
         "200":
-          description: List of meals
+          description: Every meal in the window, and how many there are
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/MealDto"
+                $ref: "#/components/schemas/MealsCompactResult"
+        "400":
+          description: Neither recordStartDate nor recordEndDate sent, or the start is after the end
+        "403":
+          description: Requester is not permitted to read this user's meals
         "404":
-          description: No meals matched the filter. Not an error, and not proof the person did not eat.
+          description: No such user
 
   /api/v1/Meals/meal/{mealId}:
     get:
@@ -1254,7 +1244,8 @@ paths:
 
         Does not return the document's contents, and does not return the extracted values
         themselves — only how many there are. It cannot be used to quote or interpret a
-        report. To read a lab's numbers use the marker tools.
+        report. To read what a document says use `search_user_documents`. To read a lab's
+        numbers use the marker tools.
 
         Returns a plain list, not a page.
 
@@ -1297,6 +1288,79 @@ paths:
       responses:
         "200":
           description: Documents with extracted features
+
+  /api/v2/Documents/search:
+    post:
+      tags: [Documents]
+      operationId: search_user_documents
+      summary: Search the text of a user's uploaded documents
+      description: |
+        Searches what a user's uploaded documents say and returns the matching passages.
+
+        Use to read or quote a document on the selected user's file — a lab report, a letter,
+        an imaging summary. This is the tool for a clinician reading a patient's documents:
+        the data store search tools only ever see the uploads of the person chatting, so on a
+        clinician's turn they return the clinician's own files, never the patient's.
+
+        The search runs as the selected user, so it returns that user's files and no one
+        else's. The caller must be allowed to read that user's records; a caller who is not
+        gets 403 and no search runs.
+
+        Each passage carries its `text`, a similarity `score`, and the document it came from:
+        `documentId`, `documentName`, `uploadedAt` and `downloadUrl`. Quote the passage text
+        and cite the document by name. A passage from an uploaded note has no `documentId`
+        and carries the stored file name.
+
+        An empty list means nothing matched the query in that user's documents. It does not
+        mean the user has no documents — `get_user_documents` lists those. Search again with
+        the clinical term rather than the user's wording before reporting that a document does
+        not mention something.
+
+        To search one document, call `get_user_documents` first and pass its `id` in
+        `documentIds`. Ids that do not belong to the selected user are ignored; when none
+        belong to them, nothing is searched and the list is empty.
+
+        Does not return extracted lab values. To read a lab's numbers as data use the marker
+        tools.
+      x-mcp-annotations:
+        readOnlyHint: true
+        idempotentHint: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [selectedUserId, query]
+              properties:
+                selectedUserId:
+                  type: string
+                  format: uuid
+                  description: Arii user ID whose documents to search. Not an Airia profile ID.
+                query:
+                  type: string
+                  description: The search text. Use the clinical term — "ferritin", not "my iron".
+                documentIds:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: Optional. Document IDs from `get_user_documents` to search within; all of the user's documents when omitted.
+      responses:
+        "200":
+          description: The matching passages, each with the document it came from
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DocumentSearchPassage"
+        "400":
+          description: selectedUserId is missing or query is empty
+        "403":
+          description: The caller may not read this user's documents; no search ran
+        "503":
+          description: Document search is not configured for the caller's group
 
   # ===================
   # SYMPTOM ENDPOINTS
@@ -2474,6 +2538,80 @@ components:
             $ref: "#/components/schemas/MealNutritionSample"
 
 
+    MealsCompactResult:
+      type: object
+      description: Every meal in the window, not paged, and how many there are.
+      properties:
+        totalCount:
+          type: integer
+          description: The number of meals in `meals`. Quote this for how many.
+        meals:
+          type: array
+          items:
+            $ref: "#/components/schemas/MealCompact"
+
+    MealCompact:
+      type: object
+      description: One meal. A field with nothing recorded is left out.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Meal ID
+        name:
+          type: string
+          description: Meal name
+        description:
+          type: string
+          description: Meal description
+        date:
+          type: string
+          format: date-time
+          description: When the meal was eaten
+        portionSizeExact:
+          type: number
+          description: Number of servings, including fractions such as 0.5
+        servingSizeImperial:
+          type: number
+          description: Imperial serving size
+        servingUnitImperial:
+          type: string
+          description: Imperial serving unit
+        servingSizeMetric:
+          type: number
+          description: Metric serving size
+        servingUnitMetric:
+          type: string
+          description: Metric serving unit
+        dataSource:
+          type: string
+          description: The source that created the meal. Absent when the meal was entered by hand.
+        loggingMethod:
+          type: string
+          description: How the meal was logged. Absent when unknown.
+          enum: [Photo, Text, Barcode, Manual, Recipe]
+        healthKitSamples:
+          type: array
+          description: The meal's nutrition, one entry per nutrient. Read each entry's `quantityTypeName`.
+          items:
+            $ref: "#/components/schemas/MealNutrientCompact"
+
+    MealNutrientCompact:
+      type: object
+      description: One nutrient recorded against a meal, named by `quantityTypeName`.
+      properties:
+        quantityTypeName:
+          type: string
+          description: >-
+            The nutrient's name, e.g. `TotalFats`, `DietaryFiber`, `DietaryProtein`,
+            `DietaryCarbohydrates`, `DietaryEnergy`, `DietarySodium`, `DietarySugar`.
+        value:
+          type: number
+          description: The recorded amount, in `unit`.
+        unit:
+          type: string
+          description: Unit as recorded — g for macros, mg for sodium, kcal for energy.
+
     NoteDto:
       type: object
       properties:
@@ -3354,6 +3492,36 @@ components:
           type: boolean
         hasNextPage:
           type: boolean
+
+    DocumentSearchPassage:
+      type: object
+      description: One passage of a user's document that matched a `search_user_documents` query.
+      properties:
+        documentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The document, as `get_user_documents` lists it. Null for a passage from an uploaded note.
+        documentName:
+          type: string
+          nullable: true
+          description: The document's name. Cite the document by this.
+        uploadedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the document was uploaded (UTC).
+        downloadUrl:
+          type: string
+          nullable: true
+          description: Link to the original file.
+        text:
+          type: string
+          description: The passage text, as stored in the document.
+        score:
+          type: number
+          nullable: true
+          description: Similarity of the passage to the query; higher is closer.
 
   securitySchemes:
     apiKeyAuth:
